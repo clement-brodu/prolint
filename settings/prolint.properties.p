@@ -117,3 +117,8 @@ files that don't match these wildcards will be skipped by prolint */
 RUN SetProlintProperty ("compilationunit.filename.mask", "*~~.p,*~~.pp,*~~.w,*~~.cls").
 
 
+/* "compilationunit.onlyIfRequired"
+don't compile files if rules don't need it
+if TRUE,  the compilation step will be skip if not required.
+if FALSE, the compilation will always happen */
+RUN SetProlintProperty ("compilationunit.onlyIfRequired", STRING( FALSE )).
