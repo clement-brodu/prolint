@@ -51,6 +51,7 @@ DEFINE VARIABLE grandchild       AS INTEGER   NO-UNDO.
 DEFINE VARIABLE tempdir          AS CHARACTER NO-UNDO.
 DEFINE VARIABLE hpFilterPlugins  AS HANDLE    NO-UNDO.
 DEFINE VARIABLE filemasks        AS CHARACTER NO-UNDO.
+DEFINE VARIABLE skipCompile      AS LOGICAL   NO-UNDO.  
 DEFINE STREAM rulemanifest.
 
 {prolint/proparse-shim/api/proparse.i hparser}
@@ -244,6 +245,9 @@ PROCEDURE InitializeRules :
         IF (NeedProparse AND NeedListing AND NeedXref AND NeedProclist) THEN
             LEAVE loop_needsomething.
     END.
+
+	/* don't comile if not required */
+	skipCompile = NOT (NeedXref OR NeedListing) AND LOGICAL(DYNAMIC-FUNCTION ("ProlintProperty", "compilationunit.onlyIfRequired")).
 
     /* forget rules that depend on proparse if proparse isn't installed */
     IF NeedProparse AND NOT HasProparse THEN
@@ -582,81 +586,83 @@ PROCEDURE PreAnalyze :
     DEFINE VARIABLE cErrorMsg        AS CHARACTER      NO-UNDO INITIAL "".
     DEFINE VARIABLE lParserResult    AS LOGICAL        NO-UNDO.
 
-    ASSIGN
-        listingfile = IF NeedListing THEN tempdir + "prolint.lst":U ELSE ?
-            xreffile    = IF NeedXref    THEN tempdir + "prolint.xrf":U ELSE ?.
+	IF NOT skipCompile THEN DO:
+		ASSIGN
+			listingfile = IF NeedListing THEN tempdir + "prolint.lst":U ELSE ?
+				xreffile    = IF NeedXref    THEN tempdir + "prolint.xrf":U ELSE ?.
 
-    /* compile if you need an XREF file and/or listing file, but also to validate the code */
-    /* please do not produce new .r-code:
-    - default location would be wrong if save into ... is required
-    - special parameters might be required, like translation params */
-    PUBLISH "Prolint_Status_Action" ("compiling...":U).
+		/* compile if you need an XREF file and/or listing file, but also to validate the code */
+		/* please do not produce new .r-code:
+		- default location would be wrong if save into ... is required
+		- special parameters might be required, like translation params */
+		PUBLISH "Prolint_Status_Action" ("compiling...":U).
 
-    compiler-loop:
-    DO compilerLoopNum = 1 TO 2:
+		compiler-loop:
+		DO compilerLoopNum = 1 TO 2:
 
-        COMPILE VALUE(p-SourceFile)
-            STREAM-IO = needCompilerStreamIO
-            /* value of ? disables xref or listing */
-            LISTING    VALUE(IF NeedListing THEN listingfile ELSE ?)
-                PAGE-SIZE 127 PAGE-WIDTH 255
-                XREF       VALUE(IF NeedXref THEN xreffile ELSE ?)
-                    NO-ERROR.
+			COMPILE VALUE(p-SourceFile)
+				STREAM-IO = needCompilerStreamIO
+				/* value of ? disables xref or listing */
+				LISTING    VALUE(IF NeedListing THEN listingfile ELSE ?)
+					PAGE-SIZE 127 PAGE-WIDTH 255
+					XREF       VALUE(IF NeedXref THEN xreffile ELSE ?)
+						NO-ERROR.
 
-        ASSIGN p-ErrorMessage = "":U.
-        IF COMPILER:ERROR THEN error-loop: DO i1=1 TO ERROR-STATUS:NUM-MESSAGES:
-            /* ignore error 6430 and 468 "r-code exists but SAVE was not specified"
-            and error 4345 : &MESSAGE output */
-            IF (ERROR-STATUS:GET-NUMBER(i1) EQ 6430) OR (ERROR-STATUS:GET-NUMBER(i1) EQ 4345) OR (ERROR-STATUS:GET-NUMBER(i1) EQ 468)
-                THEN NEXT error-loop.
+			ASSIGN p-ErrorMessage = "":U.
+			IF COMPILER:ERROR THEN error-loop: DO i1=1 TO ERROR-STATUS:NUM-MESSAGES:
+				/* ignore error 6430 and 468 "r-code exists but SAVE was not specified"
+				and error 4345 : &MESSAGE output */
+				IF (ERROR-STATUS:GET-NUMBER(i1) EQ 6430) OR (ERROR-STATUS:GET-NUMBER(i1) EQ 4345) OR (ERROR-STATUS:GET-NUMBER(i1) EQ 468)
+					THEN NEXT error-loop.
 
-            /* unexpected compiler behaviour with class files in OpenEdge 10.1A, just ignore for now */
-            IF ERROR-STATUS:GET-NUMBER(i1) EQ 12985 OR ERROR-STATUS:GET-NUMBER(i1) EQ 1700 THEN DO:
-                i1 = i1 + 1.
-                NEXT error-loop.
-            END.
+				/* unexpected compiler behaviour with class files in OpenEdge 10.1A, just ignore for now */
+				IF ERROR-STATUS:GET-NUMBER(i1) EQ 12985 OR ERROR-STATUS:GET-NUMBER(i1) EQ 1700 THEN DO:
+					i1 = i1 + 1.
+					NEXT error-loop.
+				END.
 
-            p-ErrorMessage = "Compile failed":T.
-            /* Flip the STREAM-IO flag. On the first failed compile, it
-            gets flipped. On the second failed compile, we flip it again,
-            so that it's back to its value before we tried this compile unit. */
-            ASSIGN needCompilerStreamIO = NOT needCompilerStreamIO.
-            /* collect compiler messages for ED for Windows.
-            can't publish them yet, because that would
-            change the contents of ERROR-STATUS:...
-            We might fail two attempts at compiling. In that case, we
-            want to show the first set of compiler error messages, because
-            the second compile might fail just because the STREAM-IO flag is
-            set wrong, and that wouldn't be a helpful error message. */
-            IF compilerLoopNum EQ 1 THEN DO:
-                ASSIGN cErrorMsg = cErrorMsg + ERROR-STATUS:GET-MESSAGE(i1) + "~n":U.
-                CREATE tt_Error.
-                &IF INTEGER(ENTRY(1, PROVERSION, '.')) < 11 &THEN
-                    ASSIGN
-                        tt_Error.LineNumber   = compiler:error-row
-                        tt_Error.ErrorMessage = error-status:get-message(i1).
-                &ELSE
-                    ASSIGN
-                        tt_Error.LineNumber   = COMPILER:GET-ERROR-ROW(i1)
-                        tt_Error.ErrorMessage = COMPILER:GET-MESSAGE(i1).
-                &ENDIF
+				p-ErrorMessage = "Compile failed":T.
+				/* Flip the STREAM-IO flag. On the first failed compile, it
+				gets flipped. On the second failed compile, we flip it again,
+				so that it's back to its value before we tried this compile unit. */
+				ASSIGN needCompilerStreamIO = NOT needCompilerStreamIO.
+				/* collect compiler messages for ED for Windows.
+				can't publish them yet, because that would
+				change the contents of ERROR-STATUS:...
+				We might fail two attempts at compiling. In that case, we
+				want to show the first set of compiler error messages, because
+				the second compile might fail just because the STREAM-IO flag is
+				set wrong, and that wouldn't be a helpful error message. */
+				IF compilerLoopNum EQ 1 THEN DO:
+					ASSIGN cErrorMsg = cErrorMsg + ERROR-STATUS:GET-MESSAGE(i1) + "~n":U.
+					CREATE tt_Error.
+					&IF INTEGER(ENTRY(1, PROVERSION, '.')) < 11 &THEN
+						ASSIGN
+							tt_Error.LineNumber   = compiler:error-row
+							tt_Error.ErrorMessage = error-status:get-message(i1).
+					&ELSE
+						ASSIGN
+							tt_Error.LineNumber   = COMPILER:GET-ERROR-ROW(i1)
+							tt_Error.ErrorMessage = COMPILER:GET-MESSAGE(i1).
+					&ENDIF
 
-                IF tt_Error.LineNumber=? THEN tt_Error.LineNumber=0.         END.
-        END.  /* error-loop */
+					IF tt_Error.LineNumber=? THEN tt_Error.LineNumber=0.         END.
+			END.  /* error-loop */
 
-        IF p-ErrorMessage EQ "":U THEN LEAVE compiler-loop.
+			IF p-ErrorMessage EQ "":U THEN LEAVE compiler-loop.
 
-        IF compilerLoopNum > 1 THEN DO:
-            PUBLISH "WriteToEd4Windows":U (cErrorMsg). /* just in case ED is listening */
-            /*p-SourceFile = DYNAMIC-FUNCTION("RelativeFilename":U IN hLintSuper, p-SourceFile).*/
-            PUBLISH "Prolint_AddResult":U (p-SourceFile, p-SourceFile,"0":U, p-ErrorMessage, "compiler":U, 9).
-            for each tt_Error:
-                publish "Prolint_AddResult":U (p-SourceFile, p-SourceFile,string(tt_Error.LineNumber), tt_Error.ErrorMessage, "compiler":U, 9).
-                delete tt_Error.
-            end.
-        END.
+			IF compilerLoopNum > 1 THEN DO:
+				PUBLISH "WriteToEd4Windows":U (cErrorMsg). /* just in case ED is listening */
+				/*p-SourceFile = DYNAMIC-FUNCTION("RelativeFilename":U IN hLintSuper, p-SourceFile).*/
+				PUBLISH "Prolint_AddResult":U (p-SourceFile, p-SourceFile,"0":U, p-ErrorMessage, "compiler":U, 9).
+				for each tt_Error:
+					publish "Prolint_AddResult":U (p-SourceFile, p-SourceFile,string(tt_Error.LineNumber), tt_Error.ErrorMessage, "compiler":U, 9).
+					delete tt_Error.
+				end.
+			END.
 
-    END.  /* compiler-loop */
+		END.  /* compiler-loop */
+	END. /* if not skipCompile */
 
     /* parse sourcefile in proparse.dll */
     IF NeedProparse AND HasProparse AND p-ErrorMessage="":U THEN DO:
